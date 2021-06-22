@@ -30,9 +30,9 @@ const (
 	JobManagerArg                       = "jobmanager"
 	JobManagerReadinessPath             = "/overview"
 	JobManagerReadinessInitialDelaySec  = 10
-	JobManagerReadinessTimeoutSec       = 1
+	JobManagerReadinessTimeoutSec       = 150
 	JobManagerReadinessSuccessThreshold = 1
-	JobManagerReadinessFailureThreshold = 2
+	JobManagerReadinessFailureThreshold = 10
 	JobManagerReadinessPeriodSec        = 5
 )
 
