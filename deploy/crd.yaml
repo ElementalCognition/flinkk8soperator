@@ -998,7 +998,6 @@ spec:
           required:
             - image
             - jarName
-            - parallelism
             - entryClass
   subresources:
     status: {}

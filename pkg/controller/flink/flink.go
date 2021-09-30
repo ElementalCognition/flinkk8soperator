@@ -935,6 +935,7 @@ func (f *Controller) DeleteStatusPostTeardown(ctx context.Context, application *
 
 	application.Status.JobStatus = application.Status.VersionStatuses[0].JobStatus
 	application.Status.ClusterStatus = application.Status.VersionStatuses[0].ClusterStatus
+	application.Spec.Parallelism = application.Status.JobStatus.Parallelism
 	application.Status.TaskManagersSelector = "flink-deployment-type=taskmanager,flink-application-version=" + string(application.Status.VersionStatuses[0].Version)
 }
 

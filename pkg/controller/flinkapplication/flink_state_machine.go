@@ -886,6 +886,8 @@ func (s *FlinkStateMachine) handleApplicationRunning(ctx context.Context, applic
 			s.updateApplicationPhase(application, v1beta1.FlinkApplicationUpdating)
 		}
 
+		application.Status.TaskManagersSelector = ""
+
 		return statusChanged, nil
 	}
 
