@@ -99,7 +99,7 @@ func (c *SyncMap) GetOrLoad(ctx context.Context, key string, lock *sync.Mutex) *
 	if val, found := c.Get(ctx, key); found {
 		return val
 	} else {
-		logger.Infof(ctx, "There is no mutex for key: %v", key)
+		logger.Debugf(ctx, "There is no mutex for key: %v", key)
 		c.mx.Lock()
 		defer c.mx.Unlock()
 		if val, found := c.m[key]; found {
