@@ -2,6 +2,7 @@ package flinkapplication
 
 import (
 	"context"
+	"sync"
 
 	"github.com/lyft/flytestdlib/promutils"
 	"github.com/lyft/flytestdlib/promutils/labeled"
@@ -82,10 +83,52 @@ func (r *ReconcileFlinkApplication) getReconcileResultForError(err error) reconc
 	}
 }
 
+type SyncMap struct {
+	mx sync.RWMutex
+	m  map[string]*sync.Mutex
+}
+
+func (c *SyncMap) Get(ctx context.Context, key string) (*sync.Mutex, bool) {
+	c.mx.RLock()
+	defer c.mx.RUnlock()
+	val, found := c.m[key]
+	return val, found
+}
+
+func (c *SyncMap) GetOrPut(ctx context.Context, key string, lock *sync.Mutex) *sync.Mutex {
+	if val, found := c.Get(ctx, key); found {
+		return val
+	} else {
+		logger.Infof(ctx, "There is no mutex for key: %v", key)
+		c.mx.Lock()
+		defer c.mx.Unlock()
+		if val, found := c.m[key]; found {
+			return val
+		} else {
+			c.m[key] = lock
+			return lock
+		}
+	}
+}
+
+var locks = &SyncMap{
+	mx: sync.RWMutex{},
+	m:  map[string]*sync.Mutex{},
+}
+
 func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	ctx := context.Background()
 	ctx = contextutils.WithNamespace(ctx, request.Namespace)
 	ctx = contextutils.WithAppName(ctx, request.Name)
+
+	key := string(request.Namespace) + "." + string(request.Name)
+	logger.Debugf(ctx, "Trying to get a Mutex for a resource: %v", key)
+	lock := locks.GetOrPut(ctx, key, &sync.Mutex{})
+
+	logger.Debugf(ctx, "Acquiring a lock to reconcile the resource: %v, mutex address : %p", key, lock)
+	lock.Lock()
+	defer lock.Unlock()
+
 	typeMeta := metaV1.TypeMeta{
 		Kind:       v1beta1.FlinkApplicationKind,
 		APIVersion: v1beta1.SchemeGroupVersion.String(),
