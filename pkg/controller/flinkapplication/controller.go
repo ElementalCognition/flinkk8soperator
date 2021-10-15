@@ -121,7 +121,7 @@ func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconc
 	ctx = contextutils.WithNamespace(ctx, request.Namespace)
 	ctx = contextutils.WithAppName(ctx, request.Name)
 
-	key := string(request.Namespace) + "." + string(request.Name)
+	key := fmt.Sprintf("%s.%s", request.Namespace, request.Name)
 	logger.Debugf(ctx, "Trying to get a Mutex for a resource: %v", key)
 	lock := locks.GetOrLoad(ctx, key, &sync.Mutex{})
 
