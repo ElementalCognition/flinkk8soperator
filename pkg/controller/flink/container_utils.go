@@ -172,9 +172,13 @@ func HashForApplication(app *v1beta1.FlinkApplication) string {
 	// we round-trip through json to normalize the deployment objects
 	jmDeployment := jobmanagerTemplate(app)
 	jmDeployment.OwnerReferences = make([]metav1.OwnerReference, 0)
+	delete(jmDeployment.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
+	delete(jmDeployment.Spec.Template.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
 
 	tmDeployment := taskmanagerTemplate(app)
 	tmDeployment.OwnerReferences = make([]metav1.OwnerReference, 0)
+	delete(tmDeployment.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
+	delete(tmDeployment.Spec.Template.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
 
 	jmHashBytes, err := ComputeDeploymentHash(*jmDeployment)
 	if err != nil {
