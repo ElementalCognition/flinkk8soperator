@@ -38,7 +38,7 @@ type ReconcileFlinkApplication struct {
 	cache             cache.Cache
 	metrics           *reconcilerMetrics
 	flinkStateMachine FlinkHandlerInterface
-	locks             *SyncMap
+	locks             *sync.Map
 }
 
 type reconcilerMetrics struct {
@@ -90,29 +90,6 @@ type SyncMap struct {
 	m  map[string]*sync.Mutex
 }
 
-func (c *SyncMap) Get(ctx context.Context, key string) (*sync.Mutex, bool) {
-	c.mx.RLock()
-	defer c.mx.RUnlock()
-	val, found := c.m[key]
-	return val, found
-}
-
-func (c *SyncMap) GetOrLoad(ctx context.Context, key string, lock *sync.Mutex) *sync.Mutex {
-	if val, found := c.Get(ctx, key); found {
-		return val
-	} else {
-		c.mx.Lock()
-		defer c.mx.Unlock()
-		if val, found := c.m[key]; found {
-			return val
-		} else {
-			logger.Debugf(ctx, "There is no mutex for key: %v", key)
-			c.m[key] = lock
-			return lock
-		}
-	}
-}
-
 func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	ctx := context.Background()
 	ctx = contextutils.WithNamespace(ctx, request.Namespace)
@@ -120,11 +97,16 @@ func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconc
 
 	key := fmt.Sprintf("%s.%s", request.Namespace, request.Name)
 	logger.Debugf(ctx, "Trying to get a Mutex for a resource: %v", key)
-	lock := r.locks.GetOrLoad(ctx, key, &sync.Mutex{})
+	i, ok := r.locks.LoadOrStore(key, &sync.Mutex{})
 
-	logger.Debugf(ctx, "Acquiring a lock to reconcile the resource: %v, mutex address : %p", key, lock)
-	lock.Lock()
-	defer lock.Unlock()
+	if !ok {
+		logger.Debugf(ctx, "Creating a new mutex for key: %v", key)
+	}
+
+	m := i.(*sync.Mutex)
+	logger.Debugf(ctx, "Acquiring a lock to reconcile the resource: %v, mutex address : %p", key, m)
+	m.Lock()
+	defer m.Unlock()
 
 	typeMeta := metaV1.TypeMeta{
 		Kind:       v1beta1.FlinkApplicationKind,
@@ -174,10 +156,7 @@ func Add(ctx context.Context, mgr manager.Manager, cfg config.RuntimeConfig) err
 		cache:             mgr.GetCache(),
 		metrics:           metrics,
 		flinkStateMachine: flinkStateMachine,
-		locks: &SyncMap{
-			mx: sync.RWMutex{},
-			m:  map[string]*sync.Mutex{},
-		},
+		locks:             &sync.Map{},
 	}
 
 	c, err := controller.New(config.AppName, mgr, controller.Options{
