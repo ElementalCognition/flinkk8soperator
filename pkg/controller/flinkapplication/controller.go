@@ -85,11 +85,6 @@ func (r *ReconcileFlinkApplication) getReconcileResultForError(err error) reconc
 	}
 }
 
-type SyncMap struct {
-	mx sync.RWMutex
-	m  map[string]*sync.Mutex
-}
-
 func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	ctx := context.Background()
 	ctx = contextutils.WithNamespace(ctx, request.Namespace)
