@@ -71,6 +71,15 @@ type SubmitJobResponse struct {
 	JobID string `json:"jobid"`
 }
 
+type GetWatermarksResponse struct {
+	Watermarks []FlinkWatermark `json:"jobs"`
+}
+
+type FlinkWatermark struct {
+	WatermarkID string `json:"id"`
+	Value       string `json:"value"`
+}
+
 type GetJobsResponse struct {
 	Jobs []FlinkJob `json:"jobs"`
 }

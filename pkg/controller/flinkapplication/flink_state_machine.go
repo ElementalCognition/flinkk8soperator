@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/lyft/flytestdlib/contextutils"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1179,14 +1180,58 @@ func (s *FlinkStateMachine) handleDualRunning(ctx context.Context, application *
 		return statusUnchanged, errors.Errorf("Could not find job %s", s.flinkController.GetLatestJobID(ctx, application))
 	}
 
-	// wait until all vertices have been scheduled and started more than 5 minutes
+	watermarks, err := s.flinkController.GetWatermarksForApplication(ctx, application, updatingHash)
+	if err != nil {
+		return statusUnchanged, err
+	}
+	if watermarks == nil {
+		return statusUnchanged, errors.Errorf("Could not find watermarks %s", s.flinkController.GetLatestJobID(ctx, application))
+	}
+
+	// check if all vertices have been scheduled and started more than 5 minutes
 	allVerticesStarted := true
 	for _, v := range job.Vertices {
 		allVerticesStarted = allVerticesStarted && (v.Duration > 300000)
 		logger.Infof(ctx, "Duration of job %s is %v where job.state is %s", v.Name, v.Duration, string(job.State))
 	}
 
-	if job.State == client.Running && allVerticesStarted {
+	// determine the minimum watermark over all valid watermarks
+	var MinWatermark int64 = math.MaxInt64
+	for _, v := range *watermarks {
+		i, e1 := strconv.ParseInt(v.Value, 10, 64)
+
+		// we consider all positive watermarks as valid
+		if e1 != nil && i > 0 {
+			if MinWatermark > i {
+				MinWatermark = i
+			}
+		}
+	}
+
+	logger.Debugf(ctx, "MinWatermark for jobID %s is %s", s.flinkController.GetLatestJobID(ctx, application), MinWatermark)
+
+	readyStatus := false
+	if MinWatermark != math.MaxInt64 {
+		//the minimum watermark has been found
+		var MaxLag = time.Now().Unix() - MinWatermark
+		logger.Debugf(ctx, "Max lag for jobID %s is %s", s.flinkController.GetLatestJobID(ctx, application), MaxLag)
+
+		if MaxLag < 0 {
+			return statusUnchanged, errors.Errorf("Max lag %s is negative for jobID %s", MaxLag, s.flinkController.GetLatestJobID(ctx, application))
+		}
+
+		//if the max lag is less than 10 seconds then we are ready to finish a transition
+		if MaxLag < 10 {
+			readyStatus = true
+		}
+	} else {
+		//failed to figure out the minimum over watermarks then we are trying to check how stable an application
+		if job.State == client.Running && allVerticesStarted {
+			readyStatus = true
+		}
+	}
+
+	if readyStatus {
 		logger.Infof(ctx, "Updating job has been started successfully")
 		_, _, err := s.flinkController.GetVersionAndJobIDForHash(ctx, application, deployHash)
 		if err != nil {

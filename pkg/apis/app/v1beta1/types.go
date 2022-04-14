@@ -366,6 +366,7 @@ const (
 	CheckSavepointStatus   FlinkMethod = "CheckSavepointStatus"
 	GetJobs                FlinkMethod = "GetJobs"
 	GetClusterOverview     FlinkMethod = "GetClusterOverview"
+	GetWatermarks          FlinkMethod = "GetWatermarks"
 	GetLatestCheckpoint    FlinkMethod = "GetLatestCheckpoint"
 	GetJobConfig           FlinkMethod = "GetJobConfig"
 	GetTaskManagers        FlinkMethod = "GetTaskManagers"
