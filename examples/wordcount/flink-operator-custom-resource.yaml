@@ -45,7 +45,7 @@ metadata:
     environment: development
 spec:
   serviceAccountName: wordcount-service-account
-  image: us-east4-docker.pkg.dev/elementalcognition-app-source/docker-all/lyft/wordcount:kubernetes2
+  image: us-east4-docker.pkg.dev/elementalcognition-app-source/docker-all/lyft/wordcount:watermarks2
   deploymentMode: BlueGreen
   initialParallelism: 4
   deleteMode: None
