@@ -1201,27 +1201,27 @@ func (s *FlinkStateMachine) handleDualRunning(ctx context.Context, application *
 		i, e1 := strconv.ParseInt(v.Value, 10, 64)
 
 		// we consider all positive watermarks as valid
-		if e1 != nil && i > 0 {
+		if e1 == nil && i > 0 {
 			if MinWatermark > i {
 				MinWatermark = i
 			}
 		}
 	}
 
-	logger.Debugf(ctx, "MinWatermark for jobID %s is %s", s.flinkController.GetLatestJobID(ctx, application), MinWatermark)
+	logger.Debugf(ctx, "MinWatermark for jobID %s is %v", s.flinkController.GetLatestJobID(ctx, application), MinWatermark)
 
 	readyStatus := false
 	if MinWatermark != math.MaxInt64 {
 		//the minimum watermark has been found
-		var MaxLag = time.Now().Unix() - MinWatermark
-		logger.Debugf(ctx, "Max lag for jobID %s is %s", s.flinkController.GetLatestJobID(ctx, application), MaxLag)
+		var MaxLag = time.Now().Unix()*1000 - MinWatermark
+		logger.Debugf(ctx, "Max lag for jobID %s is %v", s.flinkController.GetLatestJobID(ctx, application), MaxLag)
 
 		if MaxLag < 0 {
-			return statusUnchanged, errors.Errorf("Max lag %s is negative for jobID %s", MaxLag, s.flinkController.GetLatestJobID(ctx, application))
+			return statusUnchanged, errors.Errorf("Max lag %v is negative for jobID %s", MaxLag, s.flinkController.GetLatestJobID(ctx, application))
 		}
 
 		//if the max lag is less than 10 seconds then we are ready to finish a transition
-		if MaxLag < 10 {
+		if MaxLag < config.GetConfig().ResyncPeriod.Duration.Milliseconds()+1000 {
 			readyStatus = true
 		}
 	} else {
