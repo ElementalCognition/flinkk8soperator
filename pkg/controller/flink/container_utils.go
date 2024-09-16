@@ -172,9 +172,13 @@ func HashForApplication(app *v1beta1.FlinkApplication) string {
 	// we round-trip through json to normalize the deployment objects
 	jmDeployment := jobmanagerTemplate(app)
 	jmDeployment.OwnerReferences = make([]metav1.OwnerReference, 0)
+	сleanUpLastAppliedConfiguration(&jmDeployment.ObjectMeta.Annotations)
+	сleanUpLastAppliedConfiguration(&jmDeployment.Spec.Template.ObjectMeta.Annotations)
 
 	tmDeployment := taskmanagerTemplate(app)
 	tmDeployment.OwnerReferences = make([]metav1.OwnerReference, 0)
+	сleanUpLastAppliedConfiguration(&tmDeployment.ObjectMeta.Annotations)
+	сleanUpLastAppliedConfiguration(&tmDeployment.Spec.Template.ObjectMeta.Annotations)
 
 	jmHashBytes, err := ComputeDeploymentHash(*jmDeployment)
 	if err != nil {
@@ -203,6 +207,10 @@ func HashForApplication(app *v1beta1.FlinkApplication) string {
 	return fmt.Sprintf("%08x", hasher.Sum32())
 }
 
+func сleanUpLastAppliedConfiguration(annotations *map[string]string) {
+	delete(*annotations, "kubectl.kubernetes.io/last-applied-configuration")
+}
+
 func InjectOperatorCustomizedConfig(deployment *appsv1.Deployment, app *v1beta1.FlinkApplication, hash string, deploymentType string) {
 	var newContainers []v1.Container
 	for _, container := range deployment.Spec.Template.Spec.Containers {
@@ -211,6 +219,8 @@ func InjectOperatorCustomizedConfig(deployment *appsv1.Deployment, app *v1beta1.
 			if env.Name == OperatorFlinkConfig {
 				if isHAEnabled(app.Spec.FlinkConfig) {
 					env.Value = fmt.Sprintf("%s\nhigh-availability.cluster-id: %s-%s\n", env.Value, app.Name, hash)
+					env.Value = fmt.Sprintf("%s\nkubernetes.cluster-id: %s-%s\n", env.Value, app.Name, hash)
+					env.Value = fmt.Sprintf("%s\nkubernetes.namespace: %s\n", env.Value, app.Namespace)
 					if deploymentType == FlinkDeploymentTypeJobmanager {
 						env.Value = fmt.Sprintf("%sjobmanager.rpc.address: $HOST_IP\n", env.Value)
 					}

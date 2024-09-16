@@ -2,6 +2,10 @@ package flinkapplication
 
 import (
 	"context"
+	"fmt"
+	"github.com/lyft/flytestdlib/atomic"
+	"github.com/pkg/errors"
+	"sync"
 
 	"github.com/lyft/flytestdlib/promutils"
 	"github.com/lyft/flytestdlib/promutils/labeled"
@@ -20,7 +24,6 @@ import (
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -33,9 +36,9 @@ import (
 // ReconcileFlinkApplication reconciles a FlinkApplication resource
 type ReconcileFlinkApplication struct {
 	client            client.Client
-	cache             cache.Cache
 	metrics           *reconcilerMetrics
 	flinkStateMachine FlinkHandlerInterface
+	locks             *sync.Map
 }
 
 type reconcilerMetrics struct {
@@ -56,15 +59,7 @@ func newReconcilerMetrics(scope promutils.Scope) *reconcilerMetrics {
 }
 
 func (r *ReconcileFlinkApplication) getResource(ctx context.Context, key types.NamespacedName, obj runtime.Object) error {
-	err := r.cache.Get(ctx, key, obj)
-	if err != nil && k8.IsK8sObjectDoesNotExist(err) {
-		r.metrics.cacheMiss.Inc(ctx)
-		return r.client.Get(ctx, key, obj)
-	}
-	if err == nil {
-		r.metrics.cacheHit.Inc(ctx)
-	}
-	return err
+	return r.client.Get(ctx, key, obj)
 }
 
 // For failures, we do not want to retry immediately, as we want the underlying resource to recover.
@@ -86,6 +81,26 @@ func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconc
 	ctx := context.Background()
 	ctx = contextutils.WithNamespace(ctx, request.Namespace)
 	ctx = contextutils.WithAppName(ctx, request.Name)
+
+	key := fmt.Sprintf("%s.%s", request.Namespace, request.Name)
+	logger.Debugf(ctx, "Trying to get a Mutex for a resource: %v", key)
+	i, ok := r.locks.LoadOrStore(key, &atomic.Bool{})
+
+	if !ok {
+		logger.Debugf(ctx, "Creating a new atomic boolean for key: %v", key)
+	}
+
+	m := i.(*atomic.Bool)
+
+	logger.Debugf(ctx, "Acquiring a lock to reconcile the resource: %v, atomic boolean address : %p", key, m)
+	if !m.CompareAndSwap(false, true) {
+		logger.Debugf(ctx, "Operator is busy then enqueueing: %v", key)
+		err := errors.New("Operator is busy")
+		return r.getReconcileResultForError(err), err
+	}
+
+	defer m.Store(false)
+
 	typeMeta := metaV1.TypeMeta{
 		Kind:       v1beta1.FlinkApplicationKind,
 		APIVersion: v1beta1.SchemeGroupVersion.String(),
@@ -105,6 +120,15 @@ func (r *ReconcileFlinkApplication) Reconcile(request reconcile.Request) (reconc
 		// Error reading the object - we will check again in next loop
 		return r.getReconcileResultForError(err), nil
 	}
+
+	if instance.Spec.Parallelism == 0 {
+		if instance.Spec.InitialParallelism != 0 {
+			instance.Spec.Parallelism = instance.Spec.InitialParallelism
+		} else {
+			instance.Spec.Parallelism = 1
+		}
+	}
+
 	// We are seeing instances where getResource is removing TypeMeta
 	instance.TypeMeta = typeMeta
 	ctx = contextutils.WithPhase(ctx, string(instance.Status.Phase))
@@ -125,10 +149,11 @@ func Add(ctx context.Context, mgr manager.Manager, cfg config.RuntimeConfig) err
 
 	metrics := newReconcilerMetrics(cfg.MetricsScope)
 	reconciler := ReconcileFlinkApplication{
-		client:            mgr.GetClient(),
-		cache:             mgr.GetCache(),
+		client: mgr.GetClient(),
+		//cache:             mgr.GetCache(),
 		metrics:           metrics,
 		flinkStateMachine: flinkStateMachine,
+		locks:             &sync.Map{},
 	}
 
 	c, err := controller.New(config.AppName, mgr, controller.Options{

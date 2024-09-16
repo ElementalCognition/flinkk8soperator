@@ -39,6 +39,7 @@ type FlinkApplicationSpec struct {
 	JobManagerConfig   JobManagerConfig             `json:"jobManagerConfig,omitempty"`
 	JarName            string                       `json:"jarName"`
 	Parallelism        int32                        `json:"parallelism"`
+	InitialParallelism int32                        `json:"initialParallelism,omitempty"`
 	EntryClass         string                       `json:"entryClass,omitempty"`
 	ProgramArgs        string                       `json:"programArgs,omitempty"`
 	// Deprecated: use SavepointPath instead
@@ -183,6 +184,7 @@ type FlinkApplicationStatus struct {
 	ClusterStatus          FlinkClusterStatus              `json:"clusterStatus,omitempty"`
 	JobStatus              FlinkJobStatus                  `json:"jobStatus,omitempty"`
 	VersionStatuses        []FlinkApplicationVersionStatus `json:"versionStatuses,omitempty"`
+	TaskManagersSelector   string                          `json:"taskManagersSelector,omitempty"`
 	FailedDeployHash       string                          `json:"failedDeployHash,omitempty"`
 	RollbackHash           string                          `json:"rollbackHash,omitempty"`
 	DeployHash             string                          `json:"deployHash"`

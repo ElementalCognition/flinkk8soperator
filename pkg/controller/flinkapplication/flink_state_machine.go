@@ -2,7 +2,9 @@ package flinkapplication
 
 import (
 	"context"
+	"github.com/lyft/flytestdlib/contextutils"
 	"math"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -85,11 +87,6 @@ func (s *FlinkStateMachine) shouldRollback(ctx context.Context, application *v1b
 	if application.Spec.ForceRollback && application.Status.Phase != v1beta1.FlinkApplicationRollingBackJob {
 		return true, "forceRollback is set in the resource"
 	}
-	if application.Status.DeployHash == "" {
-		// TODO: we may want some more sophisticated way of handling this case
-		// there's no previous deploy for this application, so nothing to roll back to
-		return false, ""
-	}
 
 	// Check if the error is retryable
 	if application.Status.LastSeenError != nil && s.retryHandler.IsErrorRetryable(application.Status.LastSeenError) {
@@ -122,33 +119,57 @@ func (s *FlinkStateMachine) shouldRollback(ctx context.Context, application *v1b
 }
 
 func (s *FlinkStateMachine) Handle(ctx context.Context, application *v1beta1.FlinkApplication) error {
-	currentPhase := application.Status.Phase
-	if _, ok := s.metrics.stateMachineHandlePhaseMap[currentPhase]; !ok {
-		errMsg := fmt.Sprintf("Invalid state %s for the application", currentPhase)
-		return errors.New(errMsg)
-	}
-	timer := s.metrics.stateMachineHandlePhaseMap[currentPhase].Start(ctx)
-	successTimer := s.metrics.stateMachineHandleSuccessPhaseMap[currentPhase].Start(ctx)
 
-	defer timer.Stop()
-	updateStatus, err := s.handle(ctx, application)
+	for {
+		currentPhase := application.Status.Phase
+		if _, ok := s.metrics.stateMachineHandlePhaseMap[currentPhase]; !ok {
+			errMsg := fmt.Sprintf("Invalid state %s for the application", currentPhase)
+			return errors.New(errMsg)
+		}
+		timer := s.metrics.stateMachineHandlePhaseMap[currentPhase].Start(ctx)
+		successTimer := s.metrics.stateMachineHandleSuccessPhaseMap[currentPhase].Start(ctx)
 
-	// Update k8s object
-	if updateStatus {
-		now := v1.NewTime(s.clock.Now())
-		application.Status.LastUpdatedAt = &now
-		updateAppErr := s.k8Cluster.UpdateStatus(ctx, application)
-		if updateAppErr != nil {
+		defer timer.Stop()
+		updateStatus, err := s.handle(ctx, application)
+		ctx = contextutils.WithPhase(ctx, string(application.Status.Phase))
+
+		// Update k8s object
+		if updateStatus {
+			now := v1.NewTime(s.clock.Now())
+			application.Status.LastUpdatedAt = &now
+
+			updateAppErr := s.k8Cluster.UpdateFlinkApplicationStatus(ctx, application)
+			if updateAppErr != nil {
+				s.metrics.errorCounterPhaseMap[currentPhase].Inc(ctx)
+				//return updateAppErr
+			}
+		}
+		if err != nil {
 			s.metrics.errorCounterPhaseMap[currentPhase].Inc(ctx)
-			return updateAppErr
+			//return err
+		} else {
+			successTimer.Stop()
+		}
+
+		timer.Stop()
+
+		duration := config.GetConfig().ResyncPeriod.Duration
+		if application.Status.Phase == v1beta1.FlinkApplicationUpdating {
+			duration = time.Second
+		}
+		time.Sleep(duration)
+
+		if v1beta1.IsRunningPhase(application.Status.Phase) || application.Status.Phase == v1beta1.FlinkApplicationDeleting {
+			logger.Infof(ctx, "Finish reconciling loop because application is %v", application.Status.Phase)
+			break
+		}
+
+		if s.k8Cluster.IsFlinkApplicationDoesNotExist(ctx, application) {
+			logger.Warnf(ctx, "Finish reconciling loop due to k8s object doesn't exist anymore %v", application.Status.Phase)
+			break
 		}
 	}
-	if err != nil {
-		s.metrics.errorCounterPhaseMap[currentPhase].Inc(ctx)
-	} else {
-		successTimer.Stop()
-	}
-	return err
+	return nil
 }
 
 func (s *FlinkStateMachine) handle(ctx context.Context, application *v1beta1.FlinkApplication) (bool, error) {
@@ -179,7 +200,11 @@ func (s *FlinkStateMachine) handle(ctx context.Context, application *v1beta1.Fli
 			updateApplication, appErr = s.handleClusterStarting(ctx, application)
 		case v1beta1.FlinkApplicationSubmittingJob:
 			updateApplication, appErr = s.handleSubmittingJob(ctx, application)
-		case v1beta1.FlinkApplicationRunning, v1beta1.FlinkApplicationDeployFailed:
+		//todo: consider better way of handling DeployFailed phase
+		case v1beta1.FlinkApplicationDeployFailed:
+			logger.Infof(ctx, "Handle state skipped for application due to DeployFailed phase")
+			return updateApplication, appErr
+		case v1beta1.FlinkApplicationRunning:
 			updateApplication, appErr = s.handleApplicationRunning(ctx, application)
 		case v1beta1.FlinkApplicationCancelling:
 			updateApplication, appErr = s.handleApplicationCancelling(ctx, application)
@@ -490,7 +515,6 @@ func (s *FlinkStateMachine) handleApplicationSavepointing(ctx context.Context, a
 		} else {
 			s.flinkController.LogEvent(ctx, application, corev1.EventTypeNormal, "SavepointingJob",
 				fmt.Sprintf("Savepointing job %s with a final savepoint", s.flinkController.GetLatestJobID(ctx, application)))
-
 		}
 
 		application.Status.SavepointTriggerID = triggerID
@@ -500,6 +524,14 @@ func (s *FlinkStateMachine) handleApplicationSavepointing(ctx context.Context, a
 	// check the savepoints in progress
 	savepointStatusResponse, err := s.flinkController.GetSavepointStatus(ctx, application, application.Status.DeployHash, s.flinkController.GetLatestJobID(ctx, application))
 	if err != nil {
+		if flinkAppError, ok := err.(*v1beta1.FlinkApplicationError); ok {
+			// Check if the operation of taking a savepoint doesn't exist anymore
+			if strings.HasPrefix(flinkAppError.AppError, "CheckSavepointStatus call failed with status 404 Not Found") {
+				// retry to take a savepoint
+				application.Status.SavepointTriggerID = ""
+			}
+		}
+
 		return statusUnchanged, err
 	}
 
@@ -507,12 +539,12 @@ func (s *FlinkStateMachine) handleApplicationSavepointing(ctx context.Context, a
 		savepointStatusResponse.SavepointStatus.Status != client.SavePointInProgress {
 		// Savepointing failed
 		// TODO: we should probably retry this a few times before failing
-		s.flinkController.LogEvent(ctx, application, corev1.EventTypeWarning, "SavepointFailed",
-			fmt.Sprintf("Failed to take savepoint for job %s: %v",
-				s.flinkController.GetLatestJobID(ctx, application), savepointStatusResponse.Operation.FailureCause))
-		application.Status.RetryCount = 0
-		s.updateApplicationPhase(application, v1beta1.FlinkApplicationRecovering)
-		return statusChanged, nil
+		message := fmt.Sprintf("Failed to take savepoint for job %s: %v",
+			s.flinkController.GetLatestJobID(ctx, application), savepointStatusResponse.Operation.FailureCause)
+		s.flinkController.LogEvent(ctx, application, corev1.EventTypeWarning, "SavepointFailed", message)
+		application.Status.SavepointTriggerID = ""
+
+		return statusUnchanged, client.GetRetryableError(err, v1beta1.SavepointJob, message, 5)
 	} else if savepointStatusResponse.SavepointStatus.Status == client.SavePointCompleted {
 		if cancelFlag {
 			s.flinkController.LogEvent(ctx, application, corev1.EventTypeNormal, "CanceledJob",
@@ -584,6 +616,13 @@ func (s *FlinkStateMachine) handleApplicationRecovering(ctx context.Context, app
 
 	// TODO: the old job might still be running at this point... we should maybe try to force cancel it
 	//       (but if the JM is unavailable, our options there might be limited)
+
+	if app.Status.DeployHash == "" {
+		// Rolling back is impossible
+		s.flinkController.LogEvent(ctx, app, corev1.EventTypeWarning, "RecoveryFailed",
+			fmt.Sprintf("Failed to recover to original deployment: %s", "old running job is absent"))
+		return s.deployFailed(app)
+	}
 
 	// try to find an externalized checkpoint
 	path, err := s.flinkController.FindExternalizedCheckpoint(ctx, app, app.Status.DeployHash)
@@ -684,7 +723,7 @@ func (s *FlinkStateMachine) updateGenericService(ctx context.Context, app *v1bet
 		service.Spec.Selector[flink.PodDeploymentSelector] = selector
 		// remove the old app hash selector if it's still present
 		delete(service.Spec.Selector, flink.FlinkAppHash)
-		err = s.k8Cluster.UpdateK8Object(ctx, service)
+		err = s.k8Cluster.UpdateK8Service(ctx, app.Namespace, app.Name, string(app.Status.UpdatingVersion), service)
 		if err != nil {
 			return err
 		}
@@ -778,6 +817,8 @@ func (s *FlinkStateMachine) handleSubmittingJob(ctx context.Context, app *v1beta
 			return statusChanged, nil
 		}
 		app.Status.DeployHash = hash
+		app.Status.JobStatus = jobStatus
+		app.Status.TaskManagersSelector = "flink-deployment-type=taskmanager,flink-application-version=" + string(app.Status.DeployVersion)
 		s.updateApplicationPhase(app, v1beta1.FlinkApplicationRunning)
 		return statusChanged, nil
 	}
@@ -793,6 +834,13 @@ func (s *FlinkStateMachine) handleRollingBack(ctx context.Context, app *v1beta1.
 		// move immediately to the DeployFailed state so that the user can recover.
 		s.flinkController.LogEvent(ctx, app, corev1.EventTypeWarning, "RollbackFailed",
 			fmt.Sprintf("Failed to rollback to original deployment, manual intervention needed: %s", reason))
+		return s.deployFailed(app)
+	}
+
+	if app.Status.DeployHash == "" {
+		// Rolling back is impossible
+		s.flinkController.LogEvent(ctx, app, corev1.EventTypeWarning, "RollbackFailed",
+			fmt.Sprintf("Failed to rollback to original deployment: %s", "old job is absent"))
 		return s.deployFailed(app)
 	}
 
@@ -884,6 +932,8 @@ func (s *FlinkStateMachine) handleApplicationRunning(ctx context.Context, applic
 			s.updateApplicationPhase(application, v1beta1.FlinkApplicationUpdating)
 		}
 
+		application.Status.TaskManagersSelector = ""
+
 		return statusChanged, nil
 	}
 
@@ -942,7 +992,7 @@ func (s *FlinkStateMachine) addFinalizerIfMissing(ctx context.Context, applicati
 
 	// finalizer not present; add
 	application.Finalizers = append(application.Finalizers, finalizer)
-	return s.k8Cluster.UpdateK8Object(ctx, application)
+	return s.k8Cluster.UpdateK8FlinkApplication(ctx, application)
 }
 
 func removeString(list []string, target string) []string {
@@ -958,7 +1008,7 @@ func removeString(list []string, target string) []string {
 
 func (s *FlinkStateMachine) clearFinalizers(ctx context.Context, app *v1beta1.FlinkApplication) (bool, error) {
 	app.Finalizers = removeString(app.Finalizers, jobFinalizer)
-	return statusUnchanged, s.k8Cluster.UpdateK8Object(ctx, app)
+	return statusUnchanged, s.k8Cluster.UpdateK8FlinkApplication(ctx, app)
 }
 
 func jobFinished(job *client.FlinkJobOverview) bool {
@@ -1111,7 +1161,50 @@ func (s *FlinkStateMachine) handleDualRunning(ctx context.Context, application *
 		if err != nil {
 			logger.Warnf(ctx, "Cannot find flink application with tearDownVersionhash %s. The hash may be obsolete; Ignoring hash", versionHashToTeardown)
 		} else {
-			return s.teardownApplicationVersion(ctx, application)
+			return s.teardownApplicationVersion(ctx, application, application.Spec.TearDownVersionHash)
+		}
+	}
+
+	var deployHash = application.Status.DeployHash
+	var updatingHash = application.Status.UpdatingHash
+
+	logger.Infof(ctx, "Checking the state of Updating job with hash %s", updatingHash)
+
+	// get the state of the current application
+	job, err := s.flinkController.GetJobForApplication(ctx, application, updatingHash)
+	if err != nil {
+		return statusUnchanged, err
+	}
+	if job == nil {
+		return statusUnchanged, errors.Errorf("Could not find job %s", s.flinkController.GetLatestJobID(ctx, application))
+	}
+
+	// wait until all vertices have been scheduled and started more than 5 minutes
+	allVerticesStarted := true
+	for _, v := range job.Vertices {
+		allVerticesStarted = allVerticesStarted && (v.Duration > 900000)
+		logger.Infof(ctx, "Duration of job %s is %v where job.state is %s", v.Name, v.Duration, string(job.State))
+	}
+
+	if job.State == client.Running && allVerticesStarted {
+		logger.Infof(ctx, "Updating job has been started successfully")
+		_, _, err := s.flinkController.GetVersionAndJobIDForHash(ctx, application, deployHash)
+		if err != nil {
+			logger.Warnf(ctx, "Cannot find flink application with hash %s. The hash may be obsolete; Ignoring hash", deployHash)
+		} else {
+			return s.teardownApplicationVersion(ctx, application, deployHash)
+		}
+	} else {
+		durationOfJob := time.Now().Unix()*1000 - job.StartTime
+		logger.Infof(ctx, "Updating job is still starting where duration is %v", durationOfJob)
+
+		if durationOfJob > 1800000 {
+			_, _, err := s.flinkController.GetVersionAndJobIDForHash(ctx, application, updatingHash)
+			if err != nil {
+				logger.Warnf(ctx, "Cannot find flink application with hash %s. The hash may be obsolete; Ignoring hash", updatingHash)
+			} else {
+				return s.teardownApplicationVersion(ctx, application, updatingHash)
+			}
 		}
 	}
 
@@ -1134,8 +1227,7 @@ func (s *FlinkStateMachine) handleDualRunning(ctx context.Context, application *
 	return statusUnchanged, nil
 }
 
-func (s *FlinkStateMachine) teardownApplicationVersion(ctx context.Context, application *v1beta1.FlinkApplication) (bool, error) {
-	versionHashToTeardown := application.Spec.TearDownVersionHash
+func (s *FlinkStateMachine) teardownApplicationVersion(ctx context.Context, application *v1beta1.FlinkApplication, versionHashToTeardown string) (bool, error) {
 	versionToTeardown, jobID, _ := s.flinkController.GetVersionAndJobIDForHash(ctx, application, versionHashToTeardown)
 
 	s.flinkController.LogEvent(ctx, application, corev1.EventTypeNormal, "TeardownInitated",
@@ -1151,7 +1243,6 @@ func (s *FlinkStateMachine) teardownApplicationVersion(ctx context.Context, appl
 		s.flinkController.LogEvent(ctx, application, corev1.EventTypeWarning, "TeardownFailed",
 			fmt.Sprintf("Failed to force-cancel application version %v and hash %s; will attempt to tear down cluster immediately: %s",
 				versionToTeardown, versionHashToTeardown, err))
-		return s.deployFailed(application)
 	}
 
 	// Delete all resources associated with the teardown version
@@ -1162,7 +1253,7 @@ func (s *FlinkStateMachine) teardownApplicationVersion(ctx context.Context, appl
 				versionToTeardown, err))
 		return s.deployFailed(application)
 	}
-	s.flinkController.LogEvent(ctx, application, corev1.EventTypeWarning, "TeardownCompleted",
+	s.flinkController.LogEvent(ctx, application, corev1.EventTypeNormal, "TeardownCompleted",
 		fmt.Sprintf("Tore down application with hash %s and version %v", versionHashToTeardown,
 			versionToTeardown))
 
