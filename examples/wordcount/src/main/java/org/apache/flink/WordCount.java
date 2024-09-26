@@ -19,6 +19,9 @@
 
 package org.apache.flink;
 
+import org.apache.flink.api.common.eventtime.Watermark;
+import org.apache.flink.api.common.eventtime.WatermarkGenerator;
+import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.utils.ParameterTool;
@@ -32,6 +35,8 @@ import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.io.FilePathFilter;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
+
+import java.util.Optional;
 
 /**
  * Implements the "WordCount" program that computes a simple word occurrence
@@ -76,7 +81,34 @@ public class WordCount {
             TypeInformation<String> typeInfo = BasicTypeInfo.STRING_TYPE_INFO;
             format.setCharsetName("UTF-8");
 
-            text = env.readFile(format, filePath, FileProcessingMode.PROCESS_CONTINUOUSLY, 100, typeInfo);
+            text = env.readFile(format, filePath, FileProcessingMode.PROCESS_CONTINUOUSLY, 100, typeInfo)
+                      .assignTimestampsAndWatermarks(context -> new WatermarkGenerator<String>() {
+
+                private Long processTimeOfLatestEvent = System.nanoTime();
+
+                private long maxWatermark = Long.MIN_VALUE + 1;
+
+                @Override
+                public void onEvent(String event, long eventTimestamp, WatermarkOutput watermarkOutput) {
+                    processTimeOfLatestEvent = System.nanoTime();
+                    updateWatermark(eventTimestamp, watermarkOutput);
+                }
+
+                @Override
+                public void onPeriodicEmit(WatermarkOutput watermarkOutput) {
+                    long now = System.nanoTime();
+                    if (now - Optional.ofNullable(processTimeOfLatestEvent).orElse(now) > 10000) {
+                        updateWatermark(System.currentTimeMillis(), watermarkOutput);
+                    }
+                }
+
+                private void updateWatermark(long watermark, WatermarkOutput watermarkOutput) {
+                    if (watermark > maxWatermark) {
+                        maxWatermark = watermark;
+                        watermarkOutput.emitWatermark(new Watermark(watermark - 1L));
+                    }
+                }
+            });
 		} else {
 			System.out.println("Executing WordCount example with default input data set.");
 			System.out.println("Use --input to specify file input.");

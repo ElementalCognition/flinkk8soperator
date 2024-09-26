@@ -31,6 +31,7 @@ const checkSavepointStatusURL = "/jobs/%s/savepoints/%s"
 const getJobsURL = "/jobs"
 const getJobConfigURL = "/jobs/%s/config"
 const checkpointsURL = "/jobs/%s/checkpoints"
+const watermarksURL = "/jobs/%s/vertices/%s/watermarks"
 const taskmanagersURL = "/taskmanagers"
 const httpGet = "GET"
 const httpPost = "POST"
@@ -54,6 +55,7 @@ type FlinkAPIInterface interface {
 	SubmitJob(ctx context.Context, url string, jarID string, submitJobRequest SubmitJobRequest) (*SubmitJobResponse, error)
 	CheckSavepointStatus(ctx context.Context, url string, jobID, triggerID string) (*SavepointResponse, error)
 	GetJobs(ctx context.Context, url string) (*GetJobsResponse, error)
+	GetWatermarks(ctx context.Context, url string, jobID string, vertexID string) (*GetWatermarksResponse, error)
 	GetClusterOverview(ctx context.Context, url string) (*ClusterOverviewResponse, error)
 	GetLatestCheckpoint(ctx context.Context, url string, jobID string) (*CheckpointStatistics, error)
 	GetJobConfig(ctx context.Context, url string, jobID string) (*JobConfigResponse, error)
@@ -82,6 +84,8 @@ type flinkJobManagerClientMetrics struct {
 	getJobConfigFailureCounter   labeled.Counter
 	getClusterSuccessCounter     labeled.Counter
 	getClusterFailureCounter     labeled.Counter
+	getWatermarksSuccessCounter  labeled.Counter
+	getWatermarksFailureCounter  labeled.Counter
 	getCheckpointsSuccessCounter labeled.Counter
 	getCheckpointsFailureCounter labeled.Counter
 	savepointJobSuccessCounter   labeled.Counter
@@ -106,6 +110,8 @@ func newFlinkJobManagerClientMetrics(scope promutils.Scope) *flinkJobManagerClie
 		getJobConfigFailureCounter:   labeled.NewCounter("get_job_config_failure", "Get flink job config failed", flinkJmClientScope),
 		getClusterSuccessCounter:     labeled.NewCounter("get_cluster_success", "Get cluster overview succeeded", flinkJmClientScope),
 		getClusterFailureCounter:     labeled.NewCounter("get_cluster_failure", "Get cluster overview failed", flinkJmClientScope),
+		getWatermarksSuccessCounter:  labeled.NewCounter("get_watermarks_success", "Get watermarks succeeded", flinkJmClientScope),
+		getWatermarksFailureCounter:  labeled.NewCounter("get_watermarks_failure", "Get watermarks failed", flinkJmClientScope),
 		getCheckpointsSuccessCounter: labeled.NewCounter("get_checkpoints_success", "Get checkpoint request succeeded", flinkJmClientScope),
 		getCheckpointsFailureCounter: labeled.NewCounter("get_checkpoints_failed", "Get checkpoint request failed", flinkJmClientScope),
 		savepointJobSuccessCounter:   labeled.NewCounter("savepoint_job_success", "Savepoint job request succeeded", flinkJmClientScope),
@@ -158,6 +164,29 @@ func (c *FlinkJobManagerClient) GetClusterOverview(ctx context.Context, url stri
 	}
 	c.metrics.getClusterSuccessCounter.Inc(ctx)
 	return &clusterOverviewResponse, nil
+}
+
+func (c *FlinkJobManagerClient) GetWatermarks(ctx context.Context, url string, jobID string, vertexID string) (*GetWatermarksResponse, error) {
+	path := fmt.Sprintf(watermarksURL, jobID, vertexID)
+
+	url = url + path
+	response, err := c.executeRequest(ctx, httpGet, url, nil)
+	if err != nil {
+		c.metrics.getWatermarksFailureCounter.Inc(ctx)
+		return nil, GetRetryableError(err, v1beta1.GetWatermarks, GlobalFailure, DefaultRetries)
+	}
+	if response != nil && !response.IsSuccess() {
+		c.metrics.getWatermarksFailureCounter.Inc(ctx)
+		logger.Errorf(ctx, fmt.Sprintf("Cancel job failed with response %v", response))
+		return nil, GetRetryableError(err, v1beta1.GetWatermarks, response.Status(), DefaultRetries)
+	}
+	var getWatermarksResponse GetWatermarksResponse
+	if err = json.Unmarshal(response.Body(), &getWatermarksResponse.Watermarks); err != nil {
+		logger.Errorf(ctx, "Unable to Unmarshal getWatermarksResponse %v, err: %v", response, err)
+		return nil, GetRetryableError(err, v1beta1.GetWatermarks, JSONUnmarshalError, DefaultRetries)
+	}
+	c.metrics.getWatermarksSuccessCounter.Inc(ctx)
+	return &getWatermarksResponse, nil
 }
 
 // Helper method to execute the requests

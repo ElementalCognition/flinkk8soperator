@@ -76,6 +76,9 @@ type ControllerInterface interface {
 	// Returns the current job for the application, if one exists in the cluster
 	GetJobForApplication(ctx context.Context, application *v1beta1.FlinkApplication, hash string) (*client.FlinkJobOverview, error)
 
+	// Returns the current job for the application, if one exists in the cluster
+	GetWatermarksForApplication(ctx context.Context, application *v1beta1.FlinkApplication, hash string) (*[]client.FlinkWatermark, error)
+
 	// Returns the pair of deployments (tm/jm) for the current version of the application
 	GetCurrentDeploymentsForApp(ctx context.Context, application *v1beta1.FlinkApplication) (*common.FlinkDeployment, error)
 
@@ -244,6 +247,31 @@ func (f *Controller) GetJobForApplication(ctx context.Context, application *v1be
 	}
 
 	return jobResponse, nil
+}
+
+func (f *Controller) GetWatermarksForApplication(ctx context.Context, application *v1beta1.FlinkApplication, hash string) (*[]client.FlinkWatermark, error) {
+	jobID := f.GetLatestJobID(ctx, application)
+	if jobID == "" {
+		return nil, nil
+	}
+
+	job, err := f.GetJobForApplication(ctx, application, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	var watermark []client.FlinkWatermark
+
+	for _, v := range job.Vertices {
+		response, err := f.flinkClient.GetWatermarks(ctx, f.getURLFromApp(application, hash), jobID, v.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		watermark = append(watermark, response.Watermarks...)
+	}
+
+	return &watermark, nil
 }
 
 func (f *Controller) Savepoint(ctx context.Context, application *v1beta1.FlinkApplication, hash string, isCancel bool, jobID string) (string, error) {
